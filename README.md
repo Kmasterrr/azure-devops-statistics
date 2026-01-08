@@ -158,7 +158,7 @@ The weighted score provides a more holistic view of contribution by valuing:
 3. **Planned work** (work items) to align with team goals
 
 ### Score Interpretation
-
+ 
 | Score Range | Color | Meaning |
 |-------------|-------|---------|
 | 50+ | 🟢 Green | High activity, major contributor |

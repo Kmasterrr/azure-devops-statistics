@@ -52,13 +52,36 @@ The included `azure-pipelines-self.yaml` runs on a weekly schedule (Sundays at 6
 
 **Setup:**
 1. Create a pipeline variable named `ADOS_PAT` containing your PAT (mark as secret)
-2. The `ADOS_ORGANIZATION` is set in the pipeline YAML
+2. The `ADOS_ORGANIZATION` is automatically detected from the pipeline context
 3. Run the pipeline manually or wait for the scheduled trigger
 
 **Viewing the Report:**
 1. Go to the pipeline run summary
 2. The report summary is displayed directly on the page
 3. Click **"Artifacts"** to download the full HTML report
+
+### Teams Notifications
+
+The pipeline can send a summary notification to Microsoft Teams when the report is generated.
+
+**Setup:**
+1. In your Teams channel, add an **Incoming Webhook** connector:
+   - Click the `...` menu on the channel → **Connectors**
+   - Add **Incoming Webhook** and copy the URL
+2. In the Azure DevOps pipeline, add a variable:
+   - Name: `TEAMS_WEBHOOK_URL`
+   - Value: Your webhook URL (mark as secret)
+
+**Notification includes:**
+- Organization name and collection duration
+- Summary metrics (users, repos, commits, PRs, work items)
+- Top 5 Team Activity with scores
+- Quick links to pipeline summary and report artifact
+
+**Test the webhook locally:**
+```powershell
+.\Test-TeamsWebhook.ps1 -WebhookUrl "https://your-webhook-url"
+```
 
 ---
 
@@ -109,7 +132,7 @@ The report includes a **Team Activity** section that ranks contributors using a 
 ### Scoring Formula
 
 ```
-Activity Score = (PRs Merged × 5) + (PRs Created × 3) + (Code Reviews × 2) + (Work Items × 2) + (Commits × 1)
+Activity Score = (PRs Merged × 5) + (Code Reviews × 4) + (PRs Created × 3) + (Work Items × 2) + (Commits × 0.5)
 ```
 
 ### Point Values
@@ -117,10 +140,10 @@ Activity Score = (PRs Merged × 5) + (PRs Created × 3) + (Code Reviews × 2) + 
 | Activity | Points | Rationale |
 |----------|--------|-----------|
 | **PRs Merged** | 5 | Represents completed, shipped work that has been reviewed and integrated |
+| **Code Reviews** | 4 | Collaboration and knowledge sharing; reviewers help maintain code quality |
 | **PRs Created** | 3 | Shows initiative and work in progress; creating PRs drives the review process |
-| **Code Reviews** | 2 | Collaboration and knowledge sharing; reviewers help maintain code quality |
 | **Work Items Assigned** | 2 | Delivery of planned work; reflects participation in sprint/project planning |
-| **Commits** | 1 | Lowest weight because commit count doesn't reflect quality or impact |
+| **Commits** | 0.5 | Lowest weight because commit count doesn't reflect quality or impact |
 
 ### Why This Approach?
 

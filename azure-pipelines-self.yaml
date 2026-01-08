@@ -193,3 +193,293 @@ stages:
               Write-Host "1. Summary is displayed in the pipeline 'Summary' tab above"
               Write-Host "2. Full HTML report: Artifacts → AzureDevOpsStatisticsReport"
             displayName: 'Display Summary'
+
+          # Send notification to Microsoft Teams
+          # Requires TEAMS_WEBHOOK_URL variable to be set (get this from Teams channel > Connectors > Incoming Webhook)
+          - powershell: |
+              $webhookUrl = $env:TEAMS_WEBHOOK
+              
+              if (-not $webhookUrl) {
+                Write-Host "##vso[task.logissue type=warning]TEAMS_WEBHOOK_URL variable not set. Skipping Teams notification."
+                exit 0
+              }
+              
+              Write-Host "Sending notification to Teams..."
+              
+              # Build the artifact link
+              $artifactUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)&view=artifacts&pathAsName=false&type=publishedArtifacts"
+              $pipelineUrl = "$(System.TeamFoundationCollectionUri)$(System.TeamProject)/_build/results?buildId=$(Build.BuildId)&view=ms.vss-build-web.run-extensions-tab"
+              
+              # Load summary data
+              $summaryPath = Join-Path "$(dataPath)" "Collection-Summary.json"
+              $summary = $null
+              if (Test-Path $summaryPath) {
+                $summary = Get-Content $summaryPath | ConvertFrom-Json
+              }
+              
+              # Extract values to ensure proper interpolation
+              $orgName = "$(organizationName)"
+              $duration = if ($summary.Duration) { "$($summary.Duration)".Split('.')[0] } else { "N/A" }
+              $users = if ($summary.UsersCollected) { "$($summary.UsersCollected)" } else { "0" }
+              $repos = if ($summary.RepositoriesCollected) { "$($summary.RepositoriesCollected)" } else { "0" }
+              $commits = if ($summary.CommitsCollected) { "$($summary.CommitsCollected)" } else { "0" }
+              $prs = if ($summary.PullRequestsCollected) { "$($summary.PullRequestsCollected)" } else { "0" }
+              $workItems = if ($summary.WorkItemsCollected) { "$($summary.WorkItemsCollected)" } else { "0" }
+              
+              # Load scoring config
+              $configPath = Join-Path "$(Build.SourcesDirectory)" "Config-ScoringWeights.ps1"
+              if (Test-Path $configPath) {
+                . $configPath
+              } else {
+                $Global:ScoringWeights = @{ PRsMerged = 5; CodeReviews = 4; PRsCreated = 3; WorkItems = 2; Commits = 0.5 }
+              }
+              
+              # Calculate top 5 contributors (matching HTML report logic)
+              $topContributors = @()
+              $commitsPath = Join-Path "$(dataPath)" "GitCommits.json"
+              $prsPath = Join-Path "$(dataPath)" "GitPullRequests.json"
+              $workItemsPath = Join-Path "$(dataPath)" "WorkItems.json"
+              
+              if ((Test-Path $commitsPath) -or (Test-Path $prsPath)) {
+                $commitsData = if (Test-Path $commitsPath) { Get-Content $commitsPath | ConvertFrom-Json } else { @{ data = @() } }
+                $prsData = if (Test-Path $prsPath) { Get-Content $prsPath | ConvertFrom-Json } else { @{ data = @() } }
+                $workItemsData = if (Test-Path $workItemsPath) { Get-Content $workItemsPath | ConvertFrom-Json } else { @{ data = @() } }
+                
+                $commitsList = if ($commitsData.data) { $commitsData.data } else { $commitsData }
+                $prsList = if ($prsData.data) { $prsData.data } else { $prsData }
+                $workItemsList = if ($workItemsData.data) { $workItemsData.data } else { $workItemsData }
+                
+                # Build team activity by NAME (matching HTML report)
+                $teamActivity = @{}
+                
+                # Count commits
+                foreach ($commit in $commitsList) {
+                  $name = $commit.Author
+                  if ($name) {
+                    if (-not $teamActivity.ContainsKey($name)) {
+                      $teamActivity[$name] = @{ Name = $name; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                    }
+                    $teamActivity[$name].Commits++
+                  }
+                }
+                
+                # Count PRs created, merged, and reviews
+                foreach ($pr in $prsList) {
+                  $creator = $pr.createdBy
+                  if ($creator) {
+                    if (-not $teamActivity.ContainsKey($creator)) {
+                      $teamActivity[$creator] = @{ Name = $creator; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                    }
+                    $teamActivity[$creator].PRsCreated++
+                    if ($pr.status -eq "completed") {
+                      $teamActivity[$creator].PRsMerged++
+                    }
+                  }
+                  if ($pr.reviewers) {
+                    $reviewerList = $pr.reviewers -split "; "
+                    foreach ($reviewer in $reviewerList) {
+                      if ($reviewer -and $reviewer.Trim()) {
+                        $reviewerName = $reviewer.Trim()
+                        if (-not $teamActivity.ContainsKey($reviewerName)) {
+                          $teamActivity[$reviewerName] = @{ Name = $reviewerName; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                        }
+                        $teamActivity[$reviewerName].PRsReviewed++
+                      }
+                    }
+                  }
+                }
+                
+                # Count work items assigned
+                foreach ($wi in $workItemsList) {
+                  if ($wi.assignedTo) {
+                    $assignee = $wi.assignedTo
+                    if (-not $teamActivity.ContainsKey($assignee)) {
+                      $teamActivity[$assignee] = @{ Name = $assignee; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                    }
+                    $teamActivity[$assignee].WorkItemsAssigned++
+                  }
+                }
+                
+                # Calculate scores
+                $userScores = foreach ($person in $teamActivity.Keys) {
+                  $activity = $teamActivity[$person]
+                  $score = ($activity.PRsMerged * $Global:ScoringWeights.PRsMerged) +
+                           ($activity.PRsCreated * $Global:ScoringWeights.PRsCreated) +
+                           ($activity.PRsReviewed * $Global:ScoringWeights.CodeReviews) +
+                           ($activity.WorkItemsAssigned * $Global:ScoringWeights.WorkItems) +
+                           ($activity.Commits * $Global:ScoringWeights.Commits)
+                  
+                  if ($score -gt 0) {
+                    [PSCustomObject]@{
+                      Name = $activity.Name
+                      Score = [math]::Round($score, 1)
+                      PRsMerged = $activity.PRsMerged
+                      Reviews = $activity.PRsReviewed
+                    }
+                  }
+                }
+                $topContributors = $userScores | Sort-Object Score -Descending | Select-Object -First 5
+              }
+              
+              # Build contributor items for the card
+              $contributorItems = @()
+              if ($topContributors.Count -gt 0) {
+                $contributorItems += @{
+                  type = "TextBlock"
+                  text = "Top 5 Team Activity"
+                  weight = "Bolder"
+                  size = "Medium"
+                  spacing = "Large"
+                  separator = $true
+                }
+                $rank = 1
+                foreach ($c in $topContributors) {
+                  $medal = switch ($rank) { 1 { "1." } 2 { "2." } 3 { "3." } default { "$rank." } }
+                  $contributorItems += @{
+                    type = "ColumnSet"
+                    spacing = "Small"
+                    columns = @(
+                      @{ type = "Column"; width = "auto"; items = @(@{ type = "TextBlock"; text = $medal; weight = "Bolder"; size = "Default" }) }
+                      @{ type = "Column"; width = "stretch"; items = @(@{ type = "TextBlock"; text = $c.Name; weight = "Bolder"; wrap = $true }) }
+                      @{ type = "Column"; width = "auto"; items = @(@{ type = "TextBlock"; text = "$($c.Score)"; color = "Good"; weight = "Bolder"; size = "Default" }) }
+                    )
+                  }
+                  $rank++
+                }
+              }
+              
+              # Build card body
+              $cardBody = @(
+                        @{
+                          type = "TextBlock"
+                          size = "Large"
+                          weight = "Bolder"
+                          text = "Azure DevOps Statistics Report"
+                          color = "Accent"
+                        }
+                        @{
+                          type = "TextBlock"
+                          text = "Weekly statistics collection completed successfully"
+                          wrap = $true
+                          spacing = "Small"
+                        }
+                        @{
+                          type = "Container"
+                          style = "emphasis"
+                          items = @(
+                            @{
+                              type = "ColumnSet"
+                              columns = @(
+                                @{
+                                  type = "Column"
+                                  width = "stretch"
+                                  items = @(
+                                    @{ type = "TextBlock"; text = "Organization"; weight = "Bolder"; size = "Small" }
+                                    @{ type = "TextBlock"; text = $orgName; spacing = "None" }
+                                  )
+                                }
+                                @{
+                                  type = "Column"
+                                  width = "stretch"
+                                  items = @(
+                                    @{ type = "TextBlock"; text = "Duration"; weight = "Bolder"; size = "Small" }
+                                    @{ type = "TextBlock"; text = $duration; spacing = "None" }
+                                  )
+                                }
+                              )
+                            }
+                          )
+                        }
+                        @{
+                          type = "ColumnSet"
+                          separator = $true
+                          spacing = "Medium"
+                          columns = @(
+                            @{
+                              type = "Column"
+                              width = "stretch"
+                              items = @(
+                                @{ type = "TextBlock"; text = "Users"; weight = "Bolder"; size = "Small"; color = "Accent" }
+                                @{ type = "TextBlock"; text = $users; size = "ExtraLarge"; spacing = "None" }
+                              )
+                            }
+                            @{
+                              type = "Column"
+                              width = "stretch"
+                              items = @(
+                                @{ type = "TextBlock"; text = "Repositories"; weight = "Bolder"; size = "Small"; color = "Accent" }
+                                @{ type = "TextBlock"; text = $repos; size = "ExtraLarge"; spacing = "None" }
+                              )
+                            }
+                            @{
+                              type = "Column"
+                              width = "stretch"
+                              items = @(
+                                @{ type = "TextBlock"; text = "Commits"; weight = "Bolder"; size = "Small"; color = "Accent" }
+                                @{ type = "TextBlock"; text = $commits; size = "ExtraLarge"; spacing = "None" }
+                              )
+                            }
+                          )
+                        }
+                        @{
+                          type = "ColumnSet"
+                          spacing = "Small"
+                          columns = @(
+                            @{
+                              type = "Column"
+                              width = "stretch"
+                              items = @(
+                                @{ type = "TextBlock"; text = "Pull Requests"; weight = "Bolder"; size = "Small"; color = "Accent" }
+                                @{ type = "TextBlock"; text = $prs; size = "ExtraLarge"; spacing = "None" }
+                              )
+                            }
+                            @{
+                              type = "Column"
+                              width = "stretch"
+                              items = @(
+                                @{ type = "TextBlock"; text = "Work Items"; weight = "Bolder"; size = "Small"; color = "Accent" }
+                                @{ type = "TextBlock"; text = $workItems; size = "ExtraLarge"; spacing = "None" }
+                              )
+                            }
+                            @{
+                              type = "Column"
+                              width = "stretch"
+                              items = @()
+                            }
+                          )
+                        }
+              )
+              
+              # Add contributor items if we have them
+              $cardBody += $contributorItems
+              
+              # Create Teams Adaptive Card message
+              $teamsMessage = @{
+                type = "message"
+                attachments = @(
+                  @{
+                    contentType = "application/vnd.microsoft.card.adaptive"
+                    contentUrl = $null
+                    content = @{
+                      '$schema' = "http://adaptivecards.io/schemas/adaptive-card.json"
+                      type = "AdaptiveCard"
+                      version = "1.4"
+                      body = $cardBody
+                      actions = @(
+                        @{
+                          type = "Action.OpenUrl"
+                          title = "View Pipeline Summary"
+                          url = $pipelineUrl
+                        }
+                        @{
+              try {
+                $response = Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $body -ContentType "application/json"
+                Write-Host "Teams notification sent successfully"
+              }
+              catch {
+                Write-Host "##vso[task.logissue type=warning]Failed to send Teams notification: $($_.Exception.Message)"
+              }
+            displayName: 'Send Teams Notification'
+            condition: succeededOrFailed()
+            env:
+              TEAMS_WEBHOOK: $(TEAMS_WEBHOOK_URL)

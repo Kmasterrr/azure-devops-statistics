@@ -1,7 +1,17 @@
-# Azure DevOps Statistics Collection Pipeline (Self-Organization)
-# This pipeline collects statistics for the CURRENT Azure DevOps organization
-# Uses System.AccessToken - no PAT required!
+# Azure DevOps Statistics Collection Pipeline
+# Collects statistics across ALL projects in the organization
+# Uses a PAT stored as a secret pipeline variable
 # Report summary displays directly in pipeline results (no extensions needed)
+#
+# SETUP:
+# 1. Create a PAT with these scopes:
+#    - Code: Read
+#    - Build: Read
+#    - Work Items: Read
+#    - Graph: Read
+#    - Project and Team: Read
+#    - Member Entitlement Management: Read
+# 2. In the pipeline, add a secret variable named "ADOS_PAT" with the PAT value
 
 trigger: none  # Manual trigger only
 
@@ -35,6 +45,19 @@ stages:
               echo "Collection URI: $(System.TeamFoundationCollectionUri)"
             displayName: 'Display Pipeline Info'
 
+          # Validate PAT is configured
+          - powershell: |
+              if (-not $env:ADOS_PAT -or $env:ADOS_PAT -eq '') {
+                Write-Error "ADOS_PAT secret variable is not set!"
+                Write-Error "Please add a secret variable named 'ADOS_PAT' with your Personal Access Token."
+                Write-Error "Required PAT scopes: Code (Read), Build (Read), Work Items (Read), Graph (Read), Project and Team (Read), Member Entitlement Management (Read)"
+                exit 1
+              }
+              Write-Host "✓ PAT configured"
+            displayName: 'Validate PAT Configuration'
+            env:
+              ADOS_PAT: $(ADOS_PAT)
+
           # Extract organization name and collect statistics
           - powershell: |
               # Extract organization name from collection URI
@@ -67,7 +90,7 @@ stages:
               }
             displayName: 'Collect Azure DevOps Statistics'
             env:
-              System.AccessToken: $(System.AccessToken)
+              ADOS_PAT: $(ADOS_PAT)
 
           # Find the data directory
           - powershell: |

@@ -20,7 +20,7 @@ schedules:
     displayName: Weekly Statistics Collection
     branches:
       include:
-        - main
+        - master
     always: true
 
 pool:

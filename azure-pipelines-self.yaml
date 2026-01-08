@@ -77,7 +77,7 @@ stages:
               
               # Set environment variables for the collection script
               $env:ADOS_ORGANIZATION = $organization
-              $env:ADOS_PAT = '$(System.AccessToken)'
+              $env:ADOS_PAT = $env:PAT_VALUE
               
               Write-Host "Starting statistics collection..."
               Write-Host "Output path: $(outputPath)"
@@ -90,7 +90,7 @@ stages:
               }
             displayName: 'Collect Azure DevOps Statistics'
             env:
-              ADOS_PAT: $(ADOS_PAT)
+              PAT_VALUE: $(ADOS_PAT)
 
           # Find the data directory
           - powershell: |

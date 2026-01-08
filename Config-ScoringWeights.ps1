@@ -14,7 +14,7 @@ $Global:ScoringWeights = @{
     CodeReviews     = 4    # Collaboration and knowledge sharing
     PRsCreated      = 3    # Initiative, work in progress
     WorkItems       = 2    # Delivery of planned work
-    Commits         = 1    # Lowest weight - quantity doesn't equal quality
+    Commits         = 0.5    # Lowest weight - quantity doesn't equal quality
 }
 
 # Score thresholds for color coding

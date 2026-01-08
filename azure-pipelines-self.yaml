@@ -472,6 +472,18 @@ stages:
                           url = $pipelineUrl
                         }
                         @{
+                          type = "Action.OpenUrl"
+                          title = "Download HTML Report"
+                          url = $artifactUrl
+                        }
+                      )
+                    }
+                  }
+                )
+              }
+              
+              $body = $teamsMessage | ConvertTo-Json -Depth 20
+              
               try {
                 $response = Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $body -ContentType "application/json"
                 Write-Host "Teams notification sent successfully"

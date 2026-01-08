@@ -208,6 +208,65 @@ try {
     }
     Write-Host "Git Commits collection completed. Total commits: $($allCommits.Count)" -ForegroundColor Cyan
 
+    # Collect Git Pull Requests using direct API
+    Write-Host "`nCollecting Git Pull Requests..." -ForegroundColor Yellow
+    $allPullRequests = @()
+    foreach ($repo in $allRepos) {
+        Write-Host "Processing pull requests for repository: $($repo.name) in $($repo.project)" -ForegroundColor Cyan
+        $prsUrl = "https://dev.azure.com/$Organization/$($repo.projectId)/_apis/git/repositories/$($repo.repositoryId)/pullrequests?searchCriteria.status=all&`$top=500&api-version=7.1-preview.1"
+        try {
+            $prsResponse = Invoke-RestMethod -Uri $prsUrl -Headers $headers -Method Get
+            foreach ($pr in $prsResponse.value) {
+                $allPullRequests += [PSCustomObject]@{
+                    project         = $repo.project
+                    projectId       = $repo.projectId
+                    repository      = $repo.name
+                    repositoryId    = $repo.repositoryId
+                    pullRequestId   = $pr.pullRequestId
+                    title           = $pr.title
+                    status          = $pr.status
+                    createdBy       = $pr.createdBy.displayName
+                    createdByEmail  = $pr.createdBy.uniqueName
+                    createdById     = $pr.createdBy.id
+                    creationDate    = $pr.creationDate
+                    closedDate      = $pr.closedDate
+                    closedBy        = if ($pr.closedBy) { $pr.closedBy.displayName } else { $null }
+                    sourceBranch    = $pr.sourceRefName -replace "refs/heads/", ""
+                    targetBranch    = $pr.targetRefName -replace "refs/heads/", ""
+                    mergeStatus     = $pr.mergeStatus
+                    isDraft         = $pr.isDraft
+                    reviewers       = ($pr.reviewers | ForEach-Object { $_.displayName }) -join "; "
+                    reviewerCount   = $pr.reviewers.Count
+                    timeStamp       = $TimeStamp
+                }
+            }
+        }
+        catch {
+            Write-Warning "Error getting pull requests for repository '$($repo.name)': $($_.Exception.Message)"
+        }
+    }
+
+    # Save Git Pull Requests data
+    $BaseFilename = Join-Path $DataPath "GitPullRequests"
+    if ($Format -eq "CSV" -or $Format -eq "Both") {
+        $allPullRequests | Export-Csv -Path "$BaseFilename.csv" -NoTypeInformation
+        Write-Host "Git Pull Requests data saved to: $BaseFilename.csv" -ForegroundColor Green
+    }
+    if ($Format -eq "JSON" -or $Format -eq "Both") {
+        $JsonData = @{
+            metadata = @{
+                organization = $Organization
+                collectionDate = $TimeStamp
+                recordCount = $allPullRequests.Count
+                dataType = "GitPullRequests"
+            }
+            data = $allPullRequests
+        }
+        $JsonData | ConvertTo-Json -Depth 10 | Out-File -FilePath "$BaseFilename.json" -Encoding UTF8
+        Write-Host "Git Pull Requests data saved to: $BaseFilename.json" -ForegroundColor Green
+    }
+    Write-Host "Git Pull Requests collection completed. Total pull requests: $($allPullRequests.Count)" -ForegroundColor Cyan
+
     # Collect Build Definitions (Pipelines) using direct API
     Write-Host "`nCollecting Build Pipelines..." -ForegroundColor Yellow
     $allPipelines = @()
@@ -401,6 +460,7 @@ try {
         UsersCollected = $userData.Count
         RepositoriesCollected = $allRepos.Count
         CommitsCollected = $allCommits.Count
+        PullRequestsCollected = $allPullRequests.Count
         PipelinesCollected = $allPipelines.Count
         BuildsCollected = $allBuilds.Count
         WorkItemsCollected = $allWorkItems.Count
@@ -416,11 +476,12 @@ try {
     $SummaryPath = Join-Path $DataPath "Collection-Summary.json"
     $SummaryData | ConvertTo-Json -Depth 3 | Out-File -FilePath $SummaryPath -Encoding UTF8
 
-    Write-Host "`n🎉 Data collection completed successfully!" -ForegroundColor Green
+    Write-Host "`nData collection completed successfully!" -ForegroundColor Green
     Write-Host "Duration: $($StopWatch.Elapsed)" -ForegroundColor Yellow
     Write-Host "Users: $($userData.Count)" -ForegroundColor White
     Write-Host "Repositories: $($allRepos.Count)" -ForegroundColor White
     Write-Host "Commits: $($allCommits.Count)" -ForegroundColor White
+    Write-Host "Pull Requests: $($allPullRequests.Count)" -ForegroundColor White
     Write-Host "Pipelines: $($allPipelines.Count)" -ForegroundColor White
     Write-Host "Builds: $($allBuilds.Count)" -ForegroundColor White
     Write-Host "Work Items: $($allWorkItems.Count)" -ForegroundColor White

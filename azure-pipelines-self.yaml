@@ -123,9 +123,9 @@ stages:
           - powershell: |
               $env:ADOS_ORGANIZATION = '$(organizationName)'
               
-              Write-Host "Generating report from: $(dataPath)"
+              Write-Host "Generating enhanced report from: $(dataPath)"
               
-              & "$(Build.SourcesDirectory)/Generate-Report-Fixed.ps1" -DataPath "$(dataPath)" -OutputFormat "HTML"
+              & "$(Build.SourcesDirectory)/Generate-Report-Enhanced.ps1" -DataPath "$(dataPath)" -OutputFormat "HTML"
               
               # Verify report was created
               $reportPath = Join-Path "$(dataPath)" "Azure-DevOps-Report.html"
@@ -155,99 +155,21 @@ stages:
                 **/*.json
               TargetFolder: '$(Build.ArtifactStagingDirectory)/report'
 
-          # Generate Markdown Summary for Pipeline Display (built-in, no extensions)
+          # Generate Markdown Summary for Pipeline Display
           - powershell: |
-              $summaryPath = Join-Path "$(dataPath)" "Collection-Summary.json"
               $mdPath = "$(Build.ArtifactStagingDirectory)/pipeline-summary.md"
               
-              $md = @"
-              # 📊 Azure DevOps Statistics Report
+              Write-Host "Generating pipeline summary..."
               
-              **Organization:** $(organizationName)  
-              **Collection Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+              & "$(Build.SourcesDirectory)/Generate-PipelineSummary.ps1" -DataPath "$(dataPath)" -OutputPath $mdPath -Organization "$(organizationName)"
               
-              ---
-              
-              "@
-              
-              if (Test-Path $summaryPath) {
-                $summary = Get-Content $summaryPath | ConvertFrom-Json
-                
-                $md += @"
-              ## Overview
-              
-              | Metric | Count |
-              |--------|-------|
-              | 👥 Users | $($summary.UsersCollected) |
-              | 📁 Repositories | $($summary.RepositoriesCollected) |
-              | 📝 Commits | $($summary.CommitsCollected) |
-              | 🔧 Pipelines | $($summary.PipelinesCollected) |
-              | 🏗️ Builds | $($summary.BuildsCollected) |
-              | 📋 Work Items | $($summary.WorkItemsCollected) |
-              | 📂 Projects | $($summary.ProjectsProcessed) |
-              
-              **Duration:** $($summary.Duration)
-              
-              "@
+              if (Test-Path $mdPath) {
+                # This displays the markdown in the pipeline summary
+                Write-Host "##vso[task.uploadsummary]$mdPath"
+                Write-Host "Pipeline summary generated successfully"
+              } else {
+                Write-Warning "Pipeline summary was not generated"
               }
-              
-              # Add top contributors if available
-              $commitsPath = Join-Path "$(dataPath)" "GitCommits.json"
-              if (Test-Path $commitsPath) {
-                $commitsData = Get-Content $commitsPath | ConvertFrom-Json
-                $topContributors = $commitsData.data | Group-Object author | Sort-Object Count -Descending | Select-Object -First 10
-                
-                if ($topContributors.Count -gt 0) {
-                  $md += @"
-              
-              ## 🏆 Top Contributors
-              
-              | Rank | Author | Commits |
-              |------|--------|---------|
-              "@
-                  $rank = 1
-                  foreach ($c in $topContributors) {
-                    $medal = switch ($rank) { 1 { "🥇" } 2 { "🥈" } 3 { "🥉" } default { $rank } }
-                    $md += "`n| $medal | $($c.Name) | $($c.Count) |"
-                    $rank++
-                  }
-                }
-              }
-              
-              # Add project stats if available
-              $reposPath = Join-Path "$(dataPath)" "GitRepositories.json"
-              if (Test-Path $reposPath) {
-                $reposData = Get-Content $reposPath | ConvertFrom-Json
-                $projectStats = $reposData.data | Group-Object project | Sort-Object Count -Descending
-                
-                if ($projectStats.Count -gt 0) {
-                  $md += @"
-              
-              
-              ## 📂 Repositories by Project
-              
-              | Project | Repositories |
-              |---------|--------------|
-              "@
-                  foreach ($p in $projectStats) {
-                    $md += "`n| $($p.Name) | $($p.Count) |"
-                  }
-                }
-              }
-              
-              $md += @"
-              
-              
-              ---
-              
-              📥 **Download the full HTML report from Artifacts → AzureDevOpsStatisticsReport**
-              "@
-              
-              $md | Out-File -FilePath $mdPath -Encoding UTF8
-              
-              # This displays the markdown in the pipeline summary
-              Write-Host "##vso[task.uploadsummary]$mdPath"
-              Write-Host "Pipeline summary generated"
             displayName: 'Generate Pipeline Summary'
 
           # Publish as Pipeline Artifact

@@ -1,0 +1,17 @@
+# Local data folder
+**/data/*
+
+# Tmp folder
+**/tmp/*
+
+# Any file with .ignore in the filename.
+*.ignore*
+
+# VS Code preferences folder
+.vscode
+
+# Azurite Storage Emulator files
+__azurite*
+__blobstorage__
+__queuestorage__
+__tablestorage__

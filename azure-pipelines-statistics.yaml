@@ -1,0 +1,222 @@
+# Azure DevOps Statistics Collection Pipeline
+# This pipeline collects Azure DevOps organization statistics and publishes an HTML report as an artifact
+
+trigger: none  # Manual trigger only - run on demand
+
+schedules:
+  - cron: "0 6 * * 1"  # Run every Monday at 6 AM UTC (optional scheduled run)
+    displayName: Weekly Statistics Collection
+    branches:
+      include:
+        - main
+    always: true
+
+parameters:
+  - name: organization
+    displayName: 'Azure DevOps Organization Name'
+    type: string
+    default: ''
+  - name: collectCommits
+    displayName: 'Collect Git Commits'
+    type: boolean
+    default: true
+  - name: collectWorkItems
+    displayName: 'Collect Work Items'
+    type: boolean
+    default: true
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - name: outputPath
+    value: '$(Build.SourcesDirectory)/data'
+  - name: reportDate
+    value: $[format('{0:yyyy-MM-dd}', pipeline.startTime)]
+
+stages:
+  - stage: CollectStatistics
+    displayName: 'Collect Azure DevOps Statistics'
+    jobs:
+      - job: CollectAndReport
+        displayName: 'Collect Statistics and Generate Report'
+        timeoutInMinutes: 60
+        steps:
+          # Display pipeline info
+          - script: |
+              echo "Pipeline: $(Build.DefinitionName)"
+              echo "Build Number: $(Build.BuildNumber)"
+              echo "Report Date: $(reportDate)"
+              echo "Organization: ${{ parameters.organization }}"
+            displayName: 'Display Pipeline Info'
+
+          # Validate PAT is provided
+          - powershell: |
+              if (-not $env:ADOS_PAT) {
+                Write-Error "ADOS_PAT secret variable is not set. Please configure the PAT in pipeline variables."
+                exit 1
+              }
+              Write-Host "PAT validation successful"
+            displayName: 'Validate PAT Configuration'
+            env:
+              ADOS_PAT: $(ADOS_PAT)
+
+          # Set environment variables and collect statistics
+          - powershell: |
+              # Set environment variables
+              $env:ADOS_ORGANIZATION = '${{ parameters.organization }}'
+              $env:ADOS_PAT = '$(ADOS_PAT)'
+              
+              # Validate organization
+              if ([string]::IsNullOrWhiteSpace($env:ADOS_ORGANIZATION)) {
+                # Default to current organization if not specified
+                $env:ADOS_ORGANIZATION = '$(System.TeamFoundationCollectionUri)'.TrimEnd('/').Split('/')[-1]
+                Write-Host "Using current organization: $env:ADOS_ORGANIZATION"
+              }
+              
+              Write-Host "Collecting statistics for organization: $env:ADOS_ORGANIZATION"
+              Write-Host "Output path: $(outputPath)"
+              
+              # Run the collection script
+              & "$(Build.SourcesDirectory)/Collect-Statistics-Fixed.ps1" -OutputPath "$(outputPath)" -Format "Both"
+              
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Statistics collection failed with exit code: $LASTEXITCODE"
+                exit 1
+              }
+            displayName: 'Collect Azure DevOps Statistics'
+            env:
+              ADOS_PAT: $(ADOS_PAT)
+
+          # Find the data directory (organization/date format)
+          - powershell: |
+              $organization = '${{ parameters.organization }}'
+              if ([string]::IsNullOrWhiteSpace($organization)) {
+                $organization = '$(System.TeamFoundationCollectionUri)'.TrimEnd('/').Split('/')[-1]
+              }
+              
+              # Find the latest data directory
+              $basePath = "$(outputPath)/$organization"
+              $latestDir = Get-ChildItem -Path $basePath -Directory -ErrorAction SilentlyContinue | 
+                           Sort-Object Name -Descending | 
+                           Select-Object -First 1
+              
+              if ($latestDir) {
+                $dataPath = $latestDir.FullName
+                Write-Host "Found data directory: $dataPath"
+                Write-Host "##vso[task.setvariable variable=dataPath]$dataPath"
+                Write-Host "##vso[task.setvariable variable=organizationName]$organization"
+              } else {
+                Write-Error "No data directory found at $basePath"
+                exit 1
+              }
+            displayName: 'Locate Data Directory'
+
+          # Generate HTML Report
+          - powershell: |
+              $env:ADOS_ORGANIZATION = '$(organizationName)'
+              
+              Write-Host "Generating report from: $(dataPath)"
+              
+              & "$(Build.SourcesDirectory)/Generate-Report-Fixed.ps1" -DataPath "$(dataPath)" -OutputFormat "HTML"
+              
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Report generation failed with exit code: $LASTEXITCODE"
+                exit 1
+              }
+              
+              # Verify report was created
+              $reportPath = Join-Path "$(dataPath)" "Azure-DevOps-Report.html"
+              if (Test-Path $reportPath) {
+                Write-Host "Report generated successfully: $reportPath"
+                $reportSize = (Get-Item $reportPath).Length
+                Write-Host "Report size: $reportSize bytes"
+              } else {
+                Write-Error "Report file not found at: $reportPath"
+                exit 1
+              }
+            displayName: 'Generate HTML Report'
+            env:
+              ADOS_PAT: $(ADOS_PAT)
+
+          # List generated files
+          - powershell: |
+              Write-Host "Generated files in $(dataPath):"
+              Get-ChildItem -Path "$(dataPath)" -File | Format-Table Name, Length, LastWriteTime
+            displayName: 'List Generated Files'
+
+          # Copy report to staging directory
+          - task: CopyFiles@2
+            displayName: 'Copy Report to Staging'
+            inputs:
+              SourceFolder: '$(dataPath)'
+              Contents: |
+                **/*.html
+                **/*.json
+                **/*.csv
+              TargetFolder: '$(Build.ArtifactStagingDirectory)/report'
+              flattenFolders: false
+
+          # Create an index.html that redirects to the main report (for easier viewing)
+          - powershell: |
+              $indexContent = @"
+              <!DOCTYPE html>
+              <html>
+              <head>
+                  <meta http-equiv="refresh" content="0; url=Azure-DevOps-Report.html">
+                  <title>Azure DevOps Statistics Report</title>
+              </head>
+              <body>
+                  <p>Redirecting to <a href="Azure-DevOps-Report.html">Azure DevOps Statistics Report</a>...</p>
+              </body>
+              </html>
+              "@
+              
+              $indexPath = "$(Build.ArtifactStagingDirectory)/report/index.html"
+              $indexContent | Out-File -FilePath $indexPath -Encoding UTF8
+              Write-Host "Created index.html at: $indexPath"
+            displayName: 'Create Index Page'
+
+          # Publish HTML Report as Pipeline Artifact
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish HTML Report Artifact'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/report'
+              artifact: 'AzureDevOpsStatisticsReport'
+              publishLocation: 'pipeline'
+
+          # Also publish as Build Artifact (for easier browser viewing)
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Build Artifact'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/report'
+              ArtifactName: 'StatisticsReport'
+              publishLocation: 'Container'
+
+          # Output summary
+          - powershell: |
+              Write-Host "========================================" -ForegroundColor Cyan
+              Write-Host "  Statistics Collection Complete!" -ForegroundColor Green
+              Write-Host "========================================" -ForegroundColor Cyan
+              Write-Host ""
+              Write-Host "Organization: $(organizationName)"
+              Write-Host "Data Path: $(dataPath)"
+              Write-Host ""
+              Write-Host "The HTML report is available in the pipeline artifacts."
+              Write-Host "Click on 'Artifacts' in the pipeline run to view/download the report."
+              Write-Host ""
+              
+              # Read and display summary if exists
+              $summaryPath = Join-Path "$(dataPath)" "Collection-Summary.json"
+              if (Test-Path $summaryPath) {
+                $summary = Get-Content $summaryPath | ConvertFrom-Json
+                Write-Host "Collection Summary:" -ForegroundColor Yellow
+                Write-Host "  - Duration: $($summary.Duration)"
+                Write-Host "  - Users: $($summary.UsersCollected)"
+                Write-Host "  - Repositories: $($summary.RepositoriesCollected)"
+                Write-Host "  - Commits: $($summary.CommitsCollected)"
+                Write-Host "  - Pipelines: $($summary.PipelinesCollected)"
+                Write-Host "  - Builds: $($summary.BuildsCollected)"
+                Write-Host "  - Work Items: $($summary.WorkItemsCollected)"
+              }
+            displayName: 'Display Summary'

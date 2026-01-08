@@ -1,0 +1,250 @@
+# Azure DevOps Statistics Collection Pipeline (Self-Organization)
+# This pipeline collects statistics for the CURRENT Azure DevOps organization
+# Uses System.AccessToken - no PAT required!
+# Report summary displays directly in pipeline results (no extensions needed)
+
+trigger: none  # Manual trigger only
+
+schedules:
+  - cron: "0 6 * * 0"  # Weekly on Sunday at 6 AM UTC
+    displayName: Weekly Statistics Collection
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - name: outputPath
+    value: '$(Build.SourcesDirectory)/data'
+
+stages:
+  - stage: CollectStatistics
+    displayName: 'Collect Azure DevOps Statistics'
+    jobs:
+      - job: CollectAndReport
+        displayName: 'Collect Statistics and Generate Report'
+        timeoutInMinutes: 60
+        steps:
+          # Display pipeline info
+          - script: |
+              echo "Pipeline: $(Build.DefinitionName)"
+              echo "Build Number: $(Build.BuildNumber)"
+              echo "Collection URI: $(System.TeamFoundationCollectionUri)"
+            displayName: 'Display Pipeline Info'
+
+          # Extract organization name and collect statistics
+          - powershell: |
+              # Extract organization name from collection URI
+              # Format: https://dev.azure.com/orgname/ or https://orgname.visualstudio.com/
+              $collectionUri = '$(System.TeamFoundationCollectionUri)'.TrimEnd('/')
+              
+              if ($collectionUri -match 'dev\.azure\.com/([^/]+)') {
+                $organization = $Matches[1]
+              } elseif ($collectionUri -match '([^/]+)\.visualstudio\.com') {
+                $organization = $Matches[1]
+              } else {
+                $organization = $collectionUri.Split('/')[-1]
+              }
+              
+              Write-Host "Detected Organization: $organization"
+              Write-Host "##vso[task.setvariable variable=organizationName]$organization"
+              
+              # Set environment variables for the collection script
+              $env:ADOS_ORGANIZATION = $organization
+              $env:ADOS_PAT = '$(System.AccessToken)'
+              
+              Write-Host "Starting statistics collection..."
+              Write-Host "Output path: $(outputPath)"
+              
+              # Run the collection script
+              & "$(Build.SourcesDirectory)/Collect-Statistics-Fixed.ps1" -OutputPath "$(outputPath)" -Format "Both"
+              
+              if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
+                Write-Warning "Collection completed with exit code: $LASTEXITCODE"
+              }
+            displayName: 'Collect Azure DevOps Statistics'
+            env:
+              System.AccessToken: $(System.AccessToken)
+
+          # Find the data directory
+          - powershell: |
+              $organization = '$(organizationName)'
+              $basePath = "$(outputPath)/$organization"
+              
+              Write-Host "Looking for data in: $basePath"
+              
+              if (Test-Path $basePath) {
+                $latestDir = Get-ChildItem -Path $basePath -Directory | 
+                             Sort-Object Name -Descending | 
+                             Select-Object -First 1
+                
+                if ($latestDir) {
+                  $dataPath = $latestDir.FullName
+                  Write-Host "Found data directory: $dataPath"
+                  Write-Host "##vso[task.setvariable variable=dataPath]$dataPath"
+                } else {
+                  Write-Error "No date subdirectory found in $basePath"
+                  exit 1
+                }
+              } else {
+                Write-Error "Base path not found: $basePath"
+                Get-ChildItem -Path "$(outputPath)" -Recurse -Directory | ForEach-Object { Write-Host $_.FullName }
+                exit 1
+              }
+            displayName: 'Locate Data Directory'
+
+          # Generate HTML Report
+          - powershell: |
+              $env:ADOS_ORGANIZATION = '$(organizationName)'
+              
+              Write-Host "Generating report from: $(dataPath)"
+              
+              & "$(Build.SourcesDirectory)/Generate-Report-Fixed.ps1" -DataPath "$(dataPath)" -OutputFormat "HTML"
+              
+              # Verify report was created
+              $reportPath = Join-Path "$(dataPath)" "Azure-DevOps-Report.html"
+              if (Test-Path $reportPath) {
+                Write-Host "✓ Report generated successfully: $reportPath"
+              } else {
+                Write-Error "Report file not found at: $reportPath"
+                exit 1
+              }
+            displayName: 'Generate HTML Report'
+
+          # List generated files
+          - powershell: |
+              Write-Host "`nGenerated files:"
+              Get-ChildItem -Path "$(dataPath)" -File | 
+                Select-Object Name, @{N='Size';E={"{0:N0} KB" -f ($_.Length/1KB)}} |
+                Format-Table -AutoSize
+            displayName: 'List Generated Files'
+
+          # Copy to staging
+          - task: CopyFiles@2
+            displayName: 'Copy Report to Staging'
+            inputs:
+              SourceFolder: '$(dataPath)'
+              Contents: |
+                **/*.html
+                **/*.json
+              TargetFolder: '$(Build.ArtifactStagingDirectory)/report'
+
+          # Generate Markdown Summary for Pipeline Display (built-in, no extensions)
+          - powershell: |
+              $summaryPath = Join-Path "$(dataPath)" "Collection-Summary.json"
+              $mdPath = "$(Build.ArtifactStagingDirectory)/pipeline-summary.md"
+              
+              $md = @"
+              # 📊 Azure DevOps Statistics Report
+              
+              **Organization:** $(organizationName)  
+              **Collection Date:** $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+              
+              ---
+              
+              "@
+              
+              if (Test-Path $summaryPath) {
+                $summary = Get-Content $summaryPath | ConvertFrom-Json
+                
+                $md += @"
+              ## Overview
+              
+              | Metric | Count |
+              |--------|-------|
+              | 👥 Users | $($summary.UsersCollected) |
+              | 📁 Repositories | $($summary.RepositoriesCollected) |
+              | 📝 Commits | $($summary.CommitsCollected) |
+              | 🔧 Pipelines | $($summary.PipelinesCollected) |
+              | 🏗️ Builds | $($summary.BuildsCollected) |
+              | 📋 Work Items | $($summary.WorkItemsCollected) |
+              | 📂 Projects | $($summary.ProjectsProcessed) |
+              
+              **Duration:** $($summary.Duration)
+              
+              "@
+              }
+              
+              # Add top contributors if available
+              $commitsPath = Join-Path "$(dataPath)" "GitCommits.json"
+              if (Test-Path $commitsPath) {
+                $commitsData = Get-Content $commitsPath | ConvertFrom-Json
+                $topContributors = $commitsData.data | Group-Object author | Sort-Object Count -Descending | Select-Object -First 10
+                
+                if ($topContributors.Count -gt 0) {
+                  $md += @"
+              
+              ## 🏆 Top Contributors
+              
+              | Rank | Author | Commits |
+              |------|--------|---------|
+              "@
+                  $rank = 1
+                  foreach ($c in $topContributors) {
+                    $medal = switch ($rank) { 1 { "🥇" } 2 { "🥈" } 3 { "🥉" } default { $rank } }
+                    $md += "`n| $medal | $($c.Name) | $($c.Count) |"
+                    $rank++
+                  }
+                }
+              }
+              
+              # Add project stats if available
+              $reposPath = Join-Path "$(dataPath)" "GitRepositories.json"
+              if (Test-Path $reposPath) {
+                $reposData = Get-Content $reposPath | ConvertFrom-Json
+                $projectStats = $reposData.data | Group-Object project | Sort-Object Count -Descending
+                
+                if ($projectStats.Count -gt 0) {
+                  $md += @"
+              
+              
+              ## 📂 Repositories by Project
+              
+              | Project | Repositories |
+              |---------|--------------|
+              "@
+                  foreach ($p in $projectStats) {
+                    $md += "`n| $($p.Name) | $($p.Count) |"
+                  }
+                }
+              }
+              
+              $md += @"
+              
+              
+              ---
+              
+              📥 **Download the full HTML report from Artifacts → AzureDevOpsStatisticsReport**
+              "@
+              
+              $md | Out-File -FilePath $mdPath -Encoding UTF8
+              
+              # This displays the markdown in the pipeline summary
+              Write-Host "##vso[task.uploadsummary]$mdPath"
+              Write-Host "Pipeline summary generated"
+            displayName: 'Generate Pipeline Summary'
+
+          # Publish as Pipeline Artifact
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publish Report Artifact'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/report'
+              artifact: 'AzureDevOpsStatisticsReport'
+              publishLocation: 'pipeline'
+
+          # Summary
+          - powershell: |
+              Write-Host ""
+              Write-Host "============================================" -ForegroundColor Green
+              Write-Host "  Statistics Collection Complete!" -ForegroundColor Green  
+              Write-Host "============================================" -ForegroundColor Green
+              Write-Host ""
+              Write-Host "Organization: $(organizationName)"
+              Write-Host ""
+              Write-Host "View results:"
+              Write-Host "1. Summary is displayed in the pipeline 'Summary' tab above"
+              Write-Host "2. Full HTML report: Artifacts → AzureDevOpsStatisticsReport"
+            displayName: 'Display Summary'

@@ -609,74 +609,113 @@ if ($OutputFormat -eq "HTML") {
         </div>
 "@
 
-    # Team Activity Section - Multiple meaningful metrics
-    # Build comprehensive activity data per person
+    # Team Activity Section - Build metrics keyed by email (to avoid name duplicates)
+    # Build a lookup of displayName/principalName -> email from Users data
+    $userIndex = @{}
+    if ($LoadedData.Users -and $LoadedData.Users.data) {
+        foreach ($u in $LoadedData.Users.data) {
+            if ($u.displayName -and $u.email) { $userIndex[$u.displayName] = $u.email }
+            if ($u.principalName -and $u.email) { $userIndex[$u.principalName] = $u.email }
+        }
+    }
+
+    # Comprehensive activity data per unique person (keyed by email when available)
     $teamActivity = @{}
-    
-    # Count commits per person
+
+    function Get-KeyAndEmailFromName([string]$name) {
+        $resolvedEmail = $null
+        if ($name -and $userIndex.ContainsKey($name)) { $resolvedEmail = $userIndex[$name] }
+        $key = if ($resolvedEmail) { $resolvedEmail } else { $name }
+        return @{ Key = $key; Email = $resolvedEmail }
+    }
+
+    # Count commits per person (use authorEmail when present)
     if ($LoadedData.GitCommits) {
         foreach ($commit in $LoadedData.GitCommits.data) {
             $name = $commit.author
-            if (-not $teamActivity.ContainsKey($name)) {
-                $teamActivity[$name] = @{ Name = $name; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
+            $email = if ($commit.authorEmail) { $commit.authorEmail } elseif ($name) { if ($userIndex.ContainsKey($name)) { $userIndex[$name] } else { $null } } else { $null }
+            $key = if ($email) { $email } elseif ($name) { $name } else { "Unknown" }
+
+            if (-not $teamActivity.ContainsKey($key)) {
+                $teamActivity[$key] = @{ Key = $key; Name = $name; Email = $email; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
+            } else {
+                # Prefer a non-empty display name if missing
+                if (-not $teamActivity[$key].Name -and $name) { $teamActivity[$key].Name = $name }
+                if (-not $teamActivity[$key].Email -and $email) { $teamActivity[$key].Email = $email }
             }
-            $teamActivity[$name].Commits++
+            $teamActivity[$key].Commits++
             $commitDate = if ($commit.authorDate) { [datetime]$commit.authorDate } else { $null }
-            if ($commitDate -and (-not $teamActivity[$name].LastActivity -or $commitDate -gt $teamActivity[$name].LastActivity)) {
-                $teamActivity[$name].LastActivity = $commitDate
+            if ($commitDate -and (-not $teamActivity[$key].LastActivity -or $commitDate -gt $teamActivity[$key].LastActivity)) {
+                $teamActivity[$key].LastActivity = $commitDate
             }
         }
     }
-    
-    # Count PRs created and merged per person
+
+    # Count PRs created and merged per person (use createdByEmail when present)
     if ($LoadedData.GitPullRequests) {
         foreach ($pr in $LoadedData.GitPullRequests.data) {
-            $creator = $pr.createdBy
-            if ($creator) {
-                if (-not $teamActivity.ContainsKey($creator)) {
-                    $teamActivity[$creator] = @{ Name = $creator; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
+            $creatorName = $pr.createdBy
+            $creatorEmail = $pr.createdByEmail
+            if ($creatorName -or $creatorEmail) {
+                if (-not $creatorEmail -and $creatorName) { if ($userIndex.ContainsKey($creatorName)) { $creatorEmail = $userIndex[$creatorName] } }
+                $creatorKey = if ($creatorEmail) { $creatorEmail } elseif ($creatorName) { $creatorName } else { "Unknown" }
+
+                if (-not $teamActivity.ContainsKey($creatorKey)) {
+                    $teamActivity[$creatorKey] = @{ Key = $creatorKey; Name = $creatorName; Email = $creatorEmail; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
+                } else {
+                    if (-not $teamActivity[$creatorKey].Name -and $creatorName) { $teamActivity[$creatorKey].Name = $creatorName }
+                    if (-not $teamActivity[$creatorKey].Email -and $creatorEmail) { $teamActivity[$creatorKey].Email = $creatorEmail }
                 }
-                $teamActivity[$creator].PRsCreated++
-                if ($pr.status -eq "completed") {
-                    $teamActivity[$creator].PRsMerged++
-                }
+                $teamActivity[$creatorKey].PRsCreated++
+                if ($pr.status -eq "completed") { $teamActivity[$creatorKey].PRsMerged++ }
                 $prDate = if ($pr.creationDate) { [datetime]$pr.creationDate } else { $null }
-                if ($prDate -and (-not $teamActivity[$creator].LastActivity -or $prDate -gt $teamActivity[$creator].LastActivity)) {
-                    $teamActivity[$creator].LastActivity = $prDate
+                if ($prDate -and (-not $teamActivity[$creatorKey].LastActivity -or $prDate -gt $teamActivity[$creatorKey].LastActivity)) {
+                    $teamActivity[$creatorKey].LastActivity = $prDate
                 }
             }
-            # Count reviewers
+
+            # Count reviewers (try to resolve to email via Users index)
             if ($pr.reviewers) {
                 $reviewerList = $pr.reviewers -split "; "
                 foreach ($reviewer in $reviewerList) {
                     if ($reviewer -and $reviewer.Trim()) {
                         $reviewerName = $reviewer.Trim()
-                        if (-not $teamActivity.ContainsKey($reviewerName)) {
-                            $teamActivity[$reviewerName] = @{ Name = $reviewerName; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
+                        $lookup = Get-KeyAndEmailFromName -name $reviewerName
+                        $revKey = $lookup.Key
+                        $revEmail = $lookup.Email
+                        if (-not $teamActivity.ContainsKey($revKey)) {
+                            $teamActivity[$revKey] = @{ Key = $revKey; Name = $reviewerName; Email = $revEmail; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
+                        } else {
+                            if (-not $teamActivity[$revKey].Name -and $reviewerName) { $teamActivity[$revKey].Name = $reviewerName }
+                            if (-not $teamActivity[$revKey].Email -and $revEmail) { $teamActivity[$revKey].Email = $revEmail }
                         }
-                        $teamActivity[$reviewerName].PRsReviewed++
+                        $teamActivity[$revKey].PRsReviewed++
                     }
                 }
             }
         }
     }
-    
-    # Count work items assigned and created per person
+
+    # Count work items assigned and created per person (map names to emails when possible)
     if ($LoadedData.WorkItems) {
         foreach ($wi in $LoadedData.WorkItems.data) {
             if ($wi.assignedTo) {
-                $assignee = $wi.assignedTo
-                if (-not $teamActivity.ContainsKey($assignee)) {
-                    $teamActivity[$assignee] = @{ Name = $assignee; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
+                $assigneeName = $wi.assignedTo
+                $lookup = Get-KeyAndEmailFromName -name $assigneeName
+                $assigneeKey = $lookup.Key; $assigneeEmail = $lookup.Email
+                if (-not $teamActivity.ContainsKey($assigneeKey)) {
+                    $teamActivity[$assigneeKey] = @{ Key = $assigneeKey; Name = $assigneeName; Email = $assigneeEmail; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
                 }
-                $teamActivity[$assignee].WorkItemsAssigned++
+                $teamActivity[$assigneeKey].WorkItemsAssigned++
             }
             if ($wi.createdBy) {
-                $creator = $wi.createdBy
-                if (-not $teamActivity.ContainsKey($creator)) {
-                    $teamActivity[$creator] = @{ Name = $creator; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
+                $creatorName = $wi.createdBy
+                $lookup = Get-KeyAndEmailFromName -name $creatorName
+                $creatorKey = $lookup.Key; $creatorEmail = $lookup.Email
+                if (-not $teamActivity.ContainsKey($creatorKey)) {
+                    $teamActivity[$creatorKey] = @{ Key = $creatorKey; Name = $creatorName; Email = $creatorEmail; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0; WorkItemsCreated = 0; LastActivity = $null }
                 }
-                $teamActivity[$creator].WorkItemsCreated++
+                $teamActivity[$creatorKey].WorkItemsCreated++
             }
         }
     }
@@ -705,6 +744,7 @@ if ($OutputFormat -eq "HTML") {
                 <tr>
                     <th style="width: 40px;">Rank</th>
                     <th>Team Member</th>
+                    <th>Email</th>
                     <th style="text-align: center;">PRs Merged</th>
                     <th style="text-align: center;">PRs Created</th>
                     <th style="text-align: center;">Reviews</th>
@@ -725,6 +765,7 @@ if ($OutputFormat -eq "HTML") {
                 <tr>
                     <td style="text-align: center;">$rankDisplay</td>
                     <td><strong>$($person.Name)</strong></td>
+                    <td>$($person.Email)</td>
                     <td style="text-align: center;"><span class="badge badge-success">$($person.PRsMerged)</span></td>
                     <td style="text-align: center;"><span class="badge badge-info">$($person.PRsCreated)</span></td>
                     <td style="text-align: center;">$($person.PRsReviewed)</td>

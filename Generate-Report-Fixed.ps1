@@ -309,16 +309,19 @@ if ($OutputFormat -eq "HTML") {
 
     # Add Top Contributors section
     if ($LoadedData.GitCommits) {
-        $CommitsByAuthor = $LoadedData.GitCommits.data | Group-Object author | Sort-Object Count -Descending | Select-Object -First 15
+        # Group by authorEmail to avoid duplicate contributors with same display name
+        $CommitsByAuthor = $LoadedData.GitCommits.data | Group-Object authorEmail | Sort-Object Count -Descending | Select-Object -First 15
         $htmlContent += @"
         <h2>🏆 Top Contributors</h2>
         <table>
-            <tr><th>Rank</th><th>Author</th><th>Commits</th><th>Percentage</th><th>Latest Commit</th></tr>
+            <tr><th>Rank</th><th>Author</th><th>Email</th><th>Commits</th><th>Percentage</th><th>Latest Commit</th></tr>
 "@
         $rank = 1
         foreach ($author in $CommitsByAuthor) {
             $percentage = [math]::Round(($author.Count / $Stats.TotalCommits) * 100, 1)
-            $latestCommit = ($LoadedData.GitCommits.data | Where-Object { $_.author -eq $author.Name } | Sort-Object authorDate -Descending | Select-Object -First 1).authorDate
+            # Determine a display name for this email (pick most frequent display name for that email)
+            $displayName = ($author.Group | Group-Object author | Sort-Object Count -Descending | Select-Object -First 1).Name
+            $latestCommit = ($author.Group | Sort-Object authorDate -Descending | Select-Object -First 1).authorDate
             $latestCommitFormatted = if ($latestCommit) { ([datetime]$latestCommit).ToString("yyyy-MM-dd") } else { "N/A" }
             
             $rankStyle = ""
@@ -326,7 +329,7 @@ if ($OutputFormat -eq "HTML") {
             elseif ($rank -eq 2) { $rankStyle = 'style="color: #C0C0C0; font-weight: bold;"' }  # Silver
             elseif ($rank -eq 3) { $rankStyle = 'style="color: #CD7F32; font-weight: bold;"' }  # Bronze
             
-            $htmlContent += "<tr><td $rankStyle>$rank</td><td><strong>$($author.Name)</strong></td><td>$($author.Count)</td><td>$percentage%</td><td>$latestCommitFormatted</td></tr>"
+            $htmlContent += "<tr><td $rankStyle>$rank</td><td><strong>$displayName</strong></td><td>$($author.Name)</td><td>$($author.Count)</td><td>$percentage%</td><td>$latestCommitFormatted</td></tr>"
             $rank++
         }
         $htmlContent += "</table>"
@@ -335,19 +338,22 @@ if ($OutputFormat -eq "HTML") {
         $htmlContent += @"
         <h2>📊 Contributor Activity by Project</h2>
         <table>
-            <tr><th>Author</th><th>Project</th><th>Commits</th><th>Latest Commit</th><th>Repositories</th></tr>
+            <tr><th>Author</th><th>Email</th><th>Project</th><th>Commits</th><th>Latest Commit</th><th>Repositories</th></tr>
 "@
         
-        $contributorsByProject = $LoadedData.GitCommits.data | Group-Object author, project | Sort-Object { $_.Group.Count } -Descending | Select-Object -First 20
+        # Group by authorEmail and project to avoid name-based duplication
+        $contributorsByProject = $LoadedData.GitCommits.data | Group-Object authorEmail, project | Sort-Object { $_.Group.Count } -Descending | Select-Object -First 20
         foreach ($contributor in $contributorsByProject) {
-            $authorName = $contributor.Name.Split(', ')[0]
+            $email = $contributor.Name.Split(', ')[0]
             $projectName = $contributor.Name.Split(', ')[1]
             $commitCount = $contributor.Count
+            # Determine a display name for this email within this project
+            $authorName = ($contributor.Group | Group-Object author | Sort-Object Count -Descending | Select-Object -First 1).Name
             $latestCommit = ($contributor.Group | Sort-Object authorDate -Descending | Select-Object -First 1).authorDate
             $latestCommitFormatted = if ($latestCommit) { ([datetime]$latestCommit).ToString("yyyy-MM-dd") } else { "N/A" }
             $repositories = ($contributor.Group | Select-Object repository -Unique).Count
             
-            $htmlContent += "<tr><td>$authorName</td><td>$projectName</td><td>$commitCount</td><td>$latestCommitFormatted</td><td>$repositories</td></tr>"
+            $htmlContent += "<tr><td>$authorName</td><td>$email</td><td>$projectName</td><td>$commitCount</td><td>$latestCommitFormatted</td><td>$repositories</td></tr>"
         }
         $htmlContent += "</table>"
     }

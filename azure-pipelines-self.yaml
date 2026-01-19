@@ -234,56 +234,85 @@ stages:
                 $Global:ScoringWeights = @{ PRsMerged = 5; CodeReviews = 4; PRsCreated = 3; WorkItems = 2; Commits = 0.5 }
               }
               
-              # Calculate top 5 contributors (matching HTML report logic)
+              # Calculate top 5 contributors (aggregate by email like HTML report)
               $topContributors = @()
               $commitsPath = Join-Path "$(dataPath)" "GitCommits.json"
               $prsPath = Join-Path "$(dataPath)" "GitPullRequests.json"
               $workItemsPath = Join-Path "$(dataPath)" "WorkItems.json"
+              $usersPath = Join-Path "$(dataPath)" "Users.json"
               
               if ((Test-Path $commitsPath) -or (Test-Path $prsPath)) {
                 $commitsData = if (Test-Path $commitsPath) { Get-Content $commitsPath | ConvertFrom-Json } else { @{ data = @() } }
                 $prsData = if (Test-Path $prsPath) { Get-Content $prsPath | ConvertFrom-Json } else { @{ data = @() } }
                 $workItemsData = if (Test-Path $workItemsPath) { Get-Content $workItemsPath | ConvertFrom-Json } else { @{ data = @() } }
+                $usersData = if (Test-Path $usersPath) { Get-Content $usersPath | ConvertFrom-Json } else { @{ data = @() } }
                 
                 $commitsList = if ($commitsData.data) { $commitsData.data } else { $commitsData }
                 $prsList = if ($prsData.data) { $prsData.data } else { $prsData }
                 $workItemsList = if ($workItemsData.data) { $workItemsData.data } else { $workItemsData }
+                $usersList = if ($usersData.data) { $usersData.data } else { $usersData }
                 
-                # Build team activity by NAME (matching HTML report)
+                # Build user index for name->email resolution
+                $userIndex = @{}
+                foreach ($u in $usersList) {
+                  if ($u.displayName -and $u.email) { $userIndex[$u.displayName] = $u.email }
+                  if ($u.principalName -and $u.email) { $userIndex[$u.principalName] = $u.email }
+                }
+
+                # Build team activity keyed by email when available
                 $teamActivity = @{}
+                function Resolve-KeyAndEmail([string]$name, [string]$email) {
+                  $resolvedEmail = $email
+                  if (-not $resolvedEmail -and $name -and $userIndex.ContainsKey($name)) { $resolvedEmail = $userIndex[$name] }
+                  $key = if ($resolvedEmail) { $resolvedEmail } elseif ($name) { $name } else { 'Unknown' }
+                  return @{ Key = $key; Email = $resolvedEmail }
+                }
                 
                 # Count commits
                 foreach ($commit in $commitsList) {
-                  $name = $commit.Author
-                  if ($name) {
-                    if (-not $teamActivity.ContainsKey($name)) {
-                      $teamActivity[$name] = @{ Name = $name; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
-                    }
-                    $teamActivity[$name].Commits++
+                  $name = $commit.author
+                  $email = $commit.authorEmail
+                  $r = Resolve-KeyAndEmail -name $name -email $email
+                  $key = $r.Key
+                  if (-not $teamActivity.ContainsKey($key)) {
+                    $teamActivity[$key] = @{ Key = $key; Name = $name; Email = $r.Email; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                  } else {
+                    if (-not $teamActivity[$key].Name -and $name) { $teamActivity[$key].Name = $name }
+                    if (-not $teamActivity[$key].Email -and $r.Email) { $teamActivity[$key].Email = $r.Email }
                   }
+                  $teamActivity[$key].Commits++
                 }
                 
                 # Count PRs created, merged, and reviews
                 foreach ($pr in $prsList) {
-                  $creator = $pr.createdBy
-                  if ($creator) {
-                    if (-not $teamActivity.ContainsKey($creator)) {
-                      $teamActivity[$creator] = @{ Name = $creator; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                  $creatorName = $pr.createdBy
+                  $creatorEmail = $pr.createdByEmail
+                  $r = Resolve-KeyAndEmail -name $creatorName -email $creatorEmail
+                  $key = $r.Key
+                  if ($creatorName -or $creatorEmail) {
+                    if (-not $teamActivity.ContainsKey($key)) {
+                      $teamActivity[$key] = @{ Key = $key; Name = $creatorName; Email = $r.Email; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                    } else {
+                      if (-not $teamActivity[$key].Name -and $creatorName) { $teamActivity[$key].Name = $creatorName }
+                      if (-not $teamActivity[$key].Email -and $r.Email) { $teamActivity[$key].Email = $r.Email }
                     }
-                    $teamActivity[$creator].PRsCreated++
-                    if ($pr.status -eq "completed") {
-                      $teamActivity[$creator].PRsMerged++
-                    }
+                    $teamActivity[$key].PRsCreated++
+                    if ($pr.status -eq "completed") { $teamActivity[$key].PRsMerged++ }
                   }
                   if ($pr.reviewers) {
                     $reviewerList = $pr.reviewers -split "; "
                     foreach ($reviewer in $reviewerList) {
                       if ($reviewer -and $reviewer.Trim()) {
                         $reviewerName = $reviewer.Trim()
-                        if (-not $teamActivity.ContainsKey($reviewerName)) {
-                          $teamActivity[$reviewerName] = @{ Name = $reviewerName; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                        $rr = Resolve-KeyAndEmail -name $reviewerName -email $null
+                        $revKey = $rr.Key
+                        if (-not $teamActivity.ContainsKey($revKey)) {
+                          $teamActivity[$revKey] = @{ Key = $revKey; Name = $reviewerName; Email = $rr.Email; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                        } else {
+                          if (-not $teamActivity[$revKey].Name -and $reviewerName) { $teamActivity[$revKey].Name = $reviewerName }
+                          if (-not $teamActivity[$revKey].Email -and $rr.Email) { $teamActivity[$revKey].Email = $rr.Email }
                         }
-                        $teamActivity[$reviewerName].PRsReviewed++
+                        $teamActivity[$revKey].PRsReviewed++
                       }
                     }
                   }
@@ -292,11 +321,13 @@ stages:
                 # Count work items assigned
                 foreach ($wi in $workItemsList) {
                   if ($wi.assignedTo) {
-                    $assignee = $wi.assignedTo
-                    if (-not $teamActivity.ContainsKey($assignee)) {
-                      $teamActivity[$assignee] = @{ Name = $assignee; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
+                    $assigneeName = $wi.assignedTo
+                    $r = Resolve-KeyAndEmail -name $assigneeName -email $null
+                    $key = $r.Key
+                    if (-not $teamActivity.ContainsKey($key)) {
+                      $teamActivity[$key] = @{ Key = $key; Name = $assigneeName; Email = $r.Email; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItemsAssigned = 0 }
                     }
-                    $teamActivity[$assignee].WorkItemsAssigned++
+                    $teamActivity[$key].WorkItemsAssigned++
                   }
                 }
                 
@@ -312,6 +343,7 @@ stages:
                   if ($score -gt 0) {
                     [PSCustomObject]@{
                       Name = $activity.Name
+                      Email = $activity.Email
                       Score = [math]::Round($score, 1)
                       PRsMerged = $activity.PRsMerged
                       Reviews = $activity.PRsReviewed
@@ -335,12 +367,13 @@ stages:
                 $rank = 1
                 foreach ($c in $topContributors) {
                   $medal = switch ($rank) { 1 { "1." } 2 { "2." } 3 { "3." } default { "$rank." } }
+                  $displayName = if ($c.Email) { "$($c.Name) <$($c.Email)>" } else { $c.Name }
                   $contributorItems += @{
                     type = "ColumnSet"
                     spacing = "Small"
                     columns = @(
                       @{ type = "Column"; width = "auto"; items = @(@{ type = "TextBlock"; text = $medal; weight = "Bolder"; size = "Default" }) }
-                      @{ type = "Column"; width = "stretch"; items = @(@{ type = "TextBlock"; text = $c.Name; weight = "Bolder"; wrap = $true }) }
+                      @{ type = "Column"; width = "stretch"; items = @(@{ type = "TextBlock"; text = $displayName; weight = "Bolder"; wrap = $true }) }
                       @{ type = "Column"; width = "auto"; items = @(@{ type = "TextBlock"; text = "$($c.Score)"; color = "Good"; weight = "Bolder"; size = "Default" }) }
                     )
                   }

@@ -8,7 +8,8 @@ if (Test-Path $commitsFile) {
     $commits = Get-Content $commitsFile | ConvertFrom-Json
     
     Write-Host "`nTop 10 Contributors by Commit Count:" -ForegroundColor Green
-    $topContributors = $commits.data | Group-Object author | Sort-Object Count -Descending | Select-Object -First 10
+    # Group by email to avoid name-based duplication
+    $topContributors = $commits.data | Group-Object authorEmail | Sort-Object Count -Descending | Select-Object -First 10
     
     $rank = 1
     foreach ($contributor in $topContributors) {
@@ -20,10 +21,11 @@ if (Test-Path $commitsFile) {
         }
         
         $percentage = [math]::Round(($contributor.Count / $commits.data.Count) * 100, 1)
-        $latestCommit = ($commits.data | Where-Object { $_.author -eq $contributor.Name } | Sort-Object authorDate -Descending | Select-Object -First 1).authorDate
+        $displayName = ($contributor.Group | Group-Object author | Sort-Object Count -Descending | Select-Object -First 1).Name
+        $latestCommit = ($contributor.Group | Sort-Object authorDate -Descending | Select-Object -First 1).authorDate
         $latestDate = if ($latestCommit) { ([datetime]$latestCommit).ToString("yyyy-MM-dd") } else { "N/A" }
         
-        Write-Host "$medal $rank. $($contributor.Name)" -ForegroundColor White
+        Write-Host "$medal $rank. $displayName <$($contributor.Name)>" -ForegroundColor White
         Write-Host "    Commits: $($contributor.Count) ($percentage percent of total)" -ForegroundColor Gray
         Write-Host "    Latest: $latestDate" -ForegroundColor Gray
         Write-Host ""
@@ -36,12 +38,14 @@ if (Test-Path $commitsFile) {
     Write-Host "Date Range: $(($commits.data | Sort-Object authorDate | Select-Object -First 1).authorDate.Split('T')[0]) to $(($commits.data | Sort-Object authorDate -Descending | Select-Object -First 1).authorDate.Split('T')[0])" -ForegroundColor White
     
     Write-Host "`nContributors by Project:" -ForegroundColor Green
-    $contributorsByProject = $commits.data | Group-Object author, project | Sort-Object { $_.Group.Count } -Descending | Select-Object -First 15
+    # Group by email + project to avoid name-based duplication
+    $contributorsByProject = $commits.data | Group-Object authorEmail, project | Sort-Object { $_.Group.Count } -Descending | Select-Object -First 15
     foreach ($cp in $contributorsByProject) {
         $parts = $cp.Name.Split(', ')
-        $author = $parts[0]
+        $email = $parts[0]
         $project = $parts[1]
-        Write-Host "  $author -> $project : $($cp.Count) commits" -ForegroundColor Gray
+        $author = ($cp.Group | Group-Object author | Sort-Object Count -Descending | Select-Object -First 1).Name
+        Write-Host "  $author <$email> -> $project : $($cp.Count) commits" -ForegroundColor Gray
     }
     
     Write-Host "`nMost Active Repositories:" -ForegroundColor Green

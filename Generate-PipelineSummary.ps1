@@ -97,8 +97,31 @@ if ($summary) {
 "@
 }
 
-# Build Team Activity data
+# Build Team Activity data (aggregate by email when possible)
+# Build user index from Users.json to resolve display names to emails
 $teamActivity = @{}
+$userIndex = @{}
+
+$usersPath = Join-Path $DataPath "Users.json"
+if (Test-Path $usersPath) {
+    try {
+        $usersData = Get-Content $usersPath | ConvertFrom-Json
+        foreach ($u in $usersData.data) {
+            if ($u.displayName -and $u.email) { $userIndex[$u.displayName] = $u.email }
+            if ($u.principalName -and $u.email) { $userIndex[$u.principalName] = $u.email }
+        }
+        Write-Host "Loaded users index" -ForegroundColor Green
+    } catch {
+        Write-Warning "Failed to load users for index: $($_.Exception.Message)"
+    }
+}
+
+function Resolve-KeyAndEmail([string]$name, [string]$email) {
+    $resolvedEmail = $email
+    if (-not $resolvedEmail -and $name -and $userIndex.ContainsKey($name)) { $resolvedEmail = $userIndex[$name] }
+    $key = if ($resolvedEmail) { $resolvedEmail } elseif ($name) { $name } else { 'Unknown' }
+    return @{ Key = $key; Email = $resolvedEmail }
+}
 
 # Load commits
 $commitsPath = Join-Path $DataPath "GitCommits.json"
@@ -106,10 +129,16 @@ if (Test-Path $commitsPath) {
     $commitsData = Get-Content $commitsPath | ConvertFrom-Json
     foreach ($commit in $commitsData.data) {
         $name = $commit.author
-        if (-not $teamActivity.ContainsKey($name)) {
-            $teamActivity[$name] = @{ Name = $name; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItems = 0 }
+        $email = $commit.authorEmail
+        $r = Resolve-KeyAndEmail -name $name -email $email
+        $key = $r.Key
+        if (-not $teamActivity.ContainsKey($key)) {
+            $teamActivity[$key] = @{ Key = $key; Name = $name; Email = $r.Email; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItems = 0 }
+        } else {
+            if (-not $teamActivity[$key].Name -and $name) { $teamActivity[$key].Name = $name }
+            if (-not $teamActivity[$key].Email -and $r.Email) { $teamActivity[$key].Email = $r.Email }
         }
-        $teamActivity[$name].Commits++
+        $teamActivity[$key].Commits++
     }
     Write-Host "Loaded commits data" -ForegroundColor Green
 }
@@ -119,15 +148,19 @@ $prsPath = Join-Path $DataPath "GitPullRequests.json"
 if (Test-Path $prsPath) {
     $prsData = Get-Content $prsPath | ConvertFrom-Json
     foreach ($pr in $prsData.data) {
-        $creator = $pr.createdBy
-        if ($creator) {
-            if (-not $teamActivity.ContainsKey($creator)) {
-                $teamActivity[$creator] = @{ Name = $creator; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItems = 0 }
+        $creatorName = $pr.createdBy
+        $creatorEmail = $pr.createdByEmail
+        $r = Resolve-KeyAndEmail -name $creatorName -email $creatorEmail
+        $key = $r.Key
+        if ($creatorName -or $creatorEmail) {
+            if (-not $teamActivity.ContainsKey($key)) {
+                $teamActivity[$key] = @{ Key = $key; Name = $creatorName; Email = $r.Email; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItems = 0 }
+            } else {
+                if (-not $teamActivity[$key].Name -and $creatorName) { $teamActivity[$key].Name = $creatorName }
+                if (-not $teamActivity[$key].Email -and $r.Email) { $teamActivity[$key].Email = $r.Email }
             }
-            $teamActivity[$creator].PRsCreated++
-            if ($pr.status -eq "completed") {
-                $teamActivity[$creator].PRsMerged++
-            }
+            $teamActivity[$key].PRsCreated++
+            if ($pr.status -eq "completed") { $teamActivity[$key].PRsMerged++ }
         }
         # Count reviewers
         if ($pr.reviewers) {
@@ -135,10 +168,15 @@ if (Test-Path $prsPath) {
             foreach ($reviewer in $reviewerList) {
                 if ($reviewer -and $reviewer.Trim()) {
                     $reviewerName = $reviewer.Trim()
-                    if (-not $teamActivity.ContainsKey($reviewerName)) {
-                        $teamActivity[$reviewerName] = @{ Name = $reviewerName; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItems = 0 }
+                    $rr = Resolve-KeyAndEmail -name $reviewerName -email $null
+                    $revKey = $rr.Key
+                    if (-not $teamActivity.ContainsKey($revKey)) {
+                        $teamActivity[$revKey] = @{ Key = $revKey; Name = $reviewerName; Email = $rr.Email; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItems = 0 }
+                    } else {
+                        if (-not $teamActivity[$revKey].Name -and $reviewerName) { $teamActivity[$revKey].Name = $reviewerName }
+                        if (-not $teamActivity[$revKey].Email -and $rr.Email) { $teamActivity[$revKey].Email = $rr.Email }
                     }
-                    $teamActivity[$reviewerName].PRsReviewed++
+                    $teamActivity[$revKey].PRsReviewed++
                 }
             }
         }
@@ -152,11 +190,13 @@ if (Test-Path $wiPath) {
     $wiData = Get-Content $wiPath | ConvertFrom-Json
     foreach ($wi in $wiData.data) {
         if ($wi.assignedTo) {
-            $assignee = $wi.assignedTo
-            if (-not $teamActivity.ContainsKey($assignee)) {
-                $teamActivity[$assignee] = @{ Name = $assignee; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItems = 0 }
+            $assigneeName = $wi.assignedTo
+            $r = Resolve-KeyAndEmail -name $assigneeName -email $null
+            $key = $r.Key
+            if (-not $teamActivity.ContainsKey($key)) {
+                $teamActivity[$key] = @{ Key = $key; Name = $assigneeName; Email = $r.Email; Commits = 0; PRsCreated = 0; PRsMerged = 0; PRsReviewed = 0; WorkItems = 0 }
             }
-            $teamActivity[$assignee].WorkItems++
+            $teamActivity[$key].WorkItems++
         }
     }
     Write-Host "Loaded work items data" -ForegroundColor Green
@@ -180,13 +220,13 @@ if ($sortedActivity.Count -gt 0) {
 
 *Score = $formulaText*
 
-| Rank | Team Member | PRs Merged | PRs Created | Reviews | Work Items | Commits | Score |
-|------|-------------|------------|-------------|---------|------------|---------|-------|
+| Rank | Team Member | Email | PRs Merged | PRs Created | Reviews | Work Items | Commits | Score |
+|------|-------------|-------|------------|-------------|---------|------------|---------|-------|
 "@
     $rank = 1
     foreach ($person in $sortedActivity) {
         $medal = switch ($rank) { 1 { "1st" } 2 { "2nd" } 3 { "3rd" } default { "${rank}th" } }
-        $md += "`n| $medal | $($person.Name) | $($person.PRsMerged) | $($person.PRsCreated) | $($person.PRsReviewed) | $($person.WorkItems) | $($person.Commits) | **$($person.Score)** |"
+        $md += "`n| $medal | $($person.Name) | $($person.Email) | $($person.PRsMerged) | $($person.PRsCreated) | $($person.PRsReviewed) | $($person.WorkItems) | $($person.Commits) | **$($person.Score)** |"
         $rank++
     }
 }
